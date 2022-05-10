@@ -1,10 +1,16 @@
 [package]
-name = "pimoroni-trackball"
+name = "pimoroni-trackball-driver"
 version = "0.1.0"
 edition = "2021"
+authors = ["Paul Daniel Faria <Nashenas88@users.noreply.github.com>"]
+license = "MIT"
+repository = "https://github.com/Nashenas88/pimoroni-trackball-driver"
+description = "A rust embedded driver for the pimoroni trackball"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rp-hal = "0.0.2"
 nb = "1.0.0"
+embedded-hal = { version = "0.2.7", features = ["unproven"] }
+embedded-time = "0.12.1"
