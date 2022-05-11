@@ -2,11 +2,14 @@
 
 //! I2C interface for pimoroni trackball.
 
+use core::convert::Infallible;
+
 use embedded_hal::blocking::delay::DelayUs;
 use embedded_hal::blocking::i2c::{Write, WriteRead};
 use embedded_hal::digital::v2::InputPin;
 use embedded_time::duration::Microseconds;
 use embedded_time::{Clock, TimeError};
+use private::Sealed;
 
 /// I2C communication interface
 pub struct I2CInterface<I2C> {
@@ -190,17 +193,79 @@ impl<I, P> From<TimeError> for TrackballError<I, P> {
     }
 }
 
-pub type TrackballResult<T, I, P> =
-    Result<T, TrackballError<<I as Write>::Error, <P as InputPin>::Error>>;
+// Helper alias for results.
+pub type TrackballResult<T, I, P = NoneT> =
+    Result<T, TrackballError<<I as Write>::Error, <P as OptionalPin>::Error>>;
+
+/// A trait used to represent Option<InputPin> at the type level.
+pub trait OptionalPin: Sealed {
+    type Error;
+}
+
+// Sealed impls to allow InputPin and NoneT to implement OptionalPin.
+impl<T> Sealed for T where T: InputPin {}
+impl Sealed for NoneT {}
+
+// Treat InputPin's as Some(InputPin) at the type level.
+impl<T> OptionalPin for T
+where
+    T: InputPin,
+{
+    type Error = <T as InputPin>::Error;
+}
+
+// Treat NoneT's as None: Option<InputPin> at the type level.
+impl OptionalPin for NoneT {
+    type Error = Infallible;
+}
+
+mod private {
+    /// Sealed trait to prevent clients from implementing super traits on their own types.
+    pub trait Sealed {}
+}
+
+/// Empty type used to satisfy the type system in cases where no data is used. Equivalent to None
+/// in the type system.
+pub struct NoneT;
+
+pub trait Interrupt: Sealed {
+    type I: Write;
+    type P: OptionalPin;
+
+    /// Return whether the interrupt is currently triggering.
+    fn get_interrupt(&mut self) -> TrackballResult<bool, Self::I, Self::P>;
+
+    #[doc(hidden)]
+    fn setup_interrupt_mask(&mut self, value: &mut u8);
+
+    #[doc(hidden)]
+    fn process_enable_func<F>(&mut self, func: F)
+    where
+        F: for<'a> FnOnce(&'a mut Self::P);
+}
 
 /// Builder struct to simplify constructing a [Trackball] instance.
-pub struct TrackballBuilder<I, P> {
+pub struct TrackballBuilder<I, P = NoneT> {
     i2c: I2CInterface<I>,
     interrupt_pin: Option<P>,
     timeout: u32,
 }
 
-impl<I, P> TrackballBuilder<I, P> {
+impl<I> TrackballBuilder<I> {
+    /// Construct a new builder with the required [I2CInterface].
+    pub fn new(i2c: I2CInterface<I>) -> Self {
+        Self {
+            i2c,
+            interrupt_pin: Some(NoneT),
+            timeout: DEFAULT_TIMEOUT_US,
+        }
+    }
+}
+
+impl<I, P> TrackballBuilder<I, P>
+where
+    P: InputPin,
+{
     /// Construct a new builder with the required [I2CInterface].
     pub fn new(i2c: I2CInterface<I>) -> Self {
         Self {
@@ -210,12 +275,14 @@ impl<I, P> TrackballBuilder<I, P> {
         }
     }
 
-    /// Sets the interrupt pin. When this is called, you must supply an 
+    /// Sets the interrupt pin. When this is called, you must supply an
     pub fn interrupt_pin(mut self, pin: P) -> Self {
         self.interrupt_pin = Some(pin);
         self
     }
+}
 
+impl<I, P> TrackballBuilder<I, P> {
     /// Override the default timeout of 5 microseconds which is used when
     /// changing the address of the trackball.
     pub fn timeout(mut self, timeout: u32) -> Self {
@@ -227,23 +294,24 @@ impl<I, P> TrackballBuilder<I, P> {
     pub fn build(self) -> Trackball<I, P> {
         Trackball {
             i2c: self.i2c,
-            interrupt_pin: self.interrupt_pin,
+            interrupt_pin: self.interrupt_pin.unwrap(),
             timeout: self.timeout,
         }
     }
 }
 
 /// The `Trackball` struct manages communication with a Pimoroni trackball.
-pub struct Trackball<I, P> {
+pub struct Trackball<I, P = NoneT> {
     i2c: I2CInterface<I>,
-    interrupt_pin: Option<P>,
+    interrupt_pin: P,
     timeout: u32,
 }
 
 impl<I, P> Trackball<I, P>
 where
-    P: InputPin,
+    P: OptionalPin,
     I: Write<Error = <I as WriteRead>::Error> + WriteRead,
+    Self: Interrupt<I = I, P = P>,
 {
     /// Initialize the trackball.
     ///
@@ -262,9 +330,14 @@ where
         }
     }
 
+    /// Get mutable access to the underlying I2C interface.
+    pub fn i2c(&mut self) -> &mut I {
+        &mut self.i2c.i2c
+    }
+
     fn enable_interrupt(
         &mut self,
-        interrupt_enable_func: impl FnOnce(&mut P),
+        interrupt_enable_func: impl for<'a> FnOnce(&'a mut P),
     ) -> TrackballResult<(), I, P> {
         let mut value = 0u8;
         self.i2c
@@ -275,26 +348,16 @@ where
                 core::slice::from_mut(&mut value),
             )
             .map_err(TrackballError::I2C)?;
-        if self.interrupt_pin.is_some() {
-            value |= INTERRUPT_OUT_ENABLE_MASK;
-        } else {
-            value &= !INTERRUPT_OUT_ENABLE_MASK;
-        }
+        self.setup_interrupt_mask(&mut value);
 
         let res = self
             .i2c
             .i2c
             .write(self.i2c.addr, &[INTERRUPT, value])
             .map_err(TrackballError::I2C);
-        if let Some(pin) = &mut self.interrupt_pin {
-            interrupt_enable_func(pin);
-        }
-        res
-    }
 
-    /// Get the interrupt pin used by this instance.
-    pub fn interrupt(&mut self) -> Option<&mut P> {
-        self.interrupt_pin.as_mut()
+        self.process_enable_func(interrupt_enable_func);
+        res
     }
 
     /// The the rgbw colors on the trackball's LED.
@@ -385,13 +448,68 @@ where
         }
         Ok(())
     }
+}
+
+impl<I, P> Sealed for Trackball<I, P> {}
+
+impl<I, P> Interrupt for Trackball<I, P>
+where
+    P: InputPin,
+    I: Write<Error = <I as WriteRead>::Error> + WriteRead,
+{
+    type I = I;
+    type P = P;
+
+    fn get_interrupt(&mut self) -> TrackballResult<bool, I, P> {
+        self.interrupt_pin.is_low().map_err(TrackballError::Pin)
+    }
+
+    #[inline]
+    fn setup_interrupt_mask(&mut self, value: &mut u8) {
+        *value |= INTERRUPT_OUT_ENABLE_MASK;
+    }
+
+    #[inline]
+    fn process_enable_func<F>(&mut self, interrupt_enable_func: F)
+    where
+        F: for<'a> FnOnce(&'a mut Self::P),
+    {
+        (interrupt_enable_func)(&mut self.interrupt_pin)
+    }
+}
+impl<I, P> Trackball<I, P>
+where
+    P: InputPin,
+    I: Write<Error = <I as WriteRead>::Error> + WriteRead,
+{
+    /// Get the interrupt pin used by this instance.
+    pub fn interrupt(&mut self) -> &mut P {
+        &mut self.interrupt_pin
+    }
+}
+
+impl<I> Interrupt for Trackball<I>
+where
+    I: Write<Error = <I as WriteRead>::Error> + WriteRead,
+{
+    type I = I;
+    type P = NoneT;
 
     /// Return whether the interrupt is currently triggering.
-    pub fn get_interrupt(&mut self) -> TrackballResult<bool, I, P> {
-        if let Some(pin) = &self.interrupt_pin {
-            pin.is_low().map_err(TrackballError::Pin)
-        } else {
-            self.i2c.get_interrupt().map_err(TrackballError::I2C)
-        }
+    fn get_interrupt(&mut self) -> TrackballResult<bool, I> {
+        self.i2c.get_interrupt().map_err(TrackballError::I2C)
+    }
+
+    #[inline]
+    fn setup_interrupt_mask(&mut self, value: &mut u8) {
+        *value &= !INTERRUPT_OUT_ENABLE_MASK;
+    }
+
+    #[inline]
+    fn process_enable_func<F>(&mut self, _: F)
+    where
+        F: for<'a> FnOnce(&'a mut Self::P),
+    {
+        // nop
     }
 }

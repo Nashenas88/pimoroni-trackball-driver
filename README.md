@@ -22,7 +22,7 @@ use defmt_rtt as _;
 use embedded_time::duration::Extensions as _;
 use embedded_time::rate::Extensions as _;
 use panic_probe as _;
-use pimoroni_trackball as trackball;
+use pimoroni_trackball_driver as trackball;
 use rp_pico as bsp;
 use bsp::hal::clocks::{init_clocks_and_plls, Clock};
 use bsp::hal::pac::{self, interrupt};
@@ -85,7 +85,7 @@ fn main() -> ! {
     let interface = trackball::I2CInterface::new(i2c);
 
     // Construct the trackball with the I2C interface and an interrupt pin.
-    let mut trackball = TrackballBuilder::new(interface)
+    let mut trackball = TrackballBuilder::<_, Pin<_, _>>::new(interface)
         .interrupt_pin(pins.gpio22.into_pull_up_input())
         .build();
 
@@ -130,10 +130,7 @@ fn IO_IRQ_BANK0() {
         // Read the trackball data on interrupt.
         let data = trackball.read().unwrap();
         // Ensure the interrupt is cleared before we continue.
-        trackball
-            .interrupt()
-            .unwrap()
-            .clear_interrupt(Interrupt::EdgeLow);
+        trackball.interrupt().clear_interrupt(Interrupt::EdgeLow);
         data
     });
 
@@ -145,8 +142,8 @@ fn IO_IRQ_BANK0() {
             data.down,
             data.left,
             data.right,
-            if data.switch_changed { 1 } else { 0 },
-            if data.switch_pressed { 1 } else { 0 }
+            if data.switch_changed { 1u8 } else { 0 },
+            if data.switch_pressed { 1u8 } else { 0 }
         );
     }
 }
