@@ -90,7 +90,7 @@ impl<I2C> I2CInterface<I2C>
 where
     I2C: WriteRead,
 {
-    fn read(&mut self) -> Result<Data, I2C::Error> {
+    fn read(&mut self) -> Result<TrackballData, I2C::Error> {
         let mut left = 0;
         let mut right = 0;
         let mut up = 0;
@@ -112,7 +112,7 @@ where
         let switch_changed = (switch_state & !SWITCH_STATE_MASK) > 0;
         let switch_pressed = (switch_state & SWITCH_STATE_MASK) > 0;
 
-        Ok(Data {
+        Ok(TrackballData {
             left,
             right,
             up,
@@ -129,7 +129,8 @@ const VERSION: u8 = 1;
 const DEFAULT_TIMEOUT_US: u32 = 5;
 
 /// Data read from the trackball.
-pub struct Data {
+#[derive(Copy, Clone, Debug)]
+pub struct TrackballData {
     /// How many units the trackball was moved to the left.
     pub left: u8,
     /// How many units the trackball was moved to the right.
@@ -395,7 +396,7 @@ where
 
     /// Read the current state of the trackball.
     #[inline]
-    pub fn read(&mut self) -> Result<Data, <I as Write>::Error> {
+    pub fn read(&mut self) -> Result<TrackballData, <I as Write>::Error> {
         self.i2c.read()
     }
 
